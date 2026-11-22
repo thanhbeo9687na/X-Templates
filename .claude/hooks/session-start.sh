@@ -29,8 +29,8 @@ rest=""
 XT="$(xt_py)" || true
 if [ -n "${XT:-}" ] && [ -f "$XT_ROOT/.autopilot/state.json" ]; then
   status="$(py_run "$XT" loop status 2>/dev/null)" || status='không đọc được trạng thái'
-  # Quá 2 400 ký tự: giữ dòng verdict đầu, bỏ các dòng giữa, giữ nguyên các dòng cuối còn vừa (dòng checkpoint);
-  # dòng cuối dài hơn phần còn lại thì giữ phần đầu của nó.
+  # Quá 2 400 ký tự: giữ dòng verdict đầu (chặn ở 1 200 ký tự kèm "…"), bỏ các dòng giữa, giữ nguyên các dòng cuối còn
+  # vừa (dòng checkpoint); dòng cuối dài hơn phần còn lại thì giữ phần đầu của nó kèm "…"; chỉ một dòng thì cắt cụt kèm "…".
   status="$(printf '%s' "$status" | python3 -I -c '
 import sys
 t = sys.stdin.buffer.read().decode("utf-8", "replace")
@@ -38,16 +38,22 @@ n = int(sys.argv[1])
 if len(t) > n:
     mark = "\n[… đã cắt giữa …]\n"
     lines = t.split("\n")
-    keep = n - len(lines[0]) - len(mark)
-    tail, size = [], 0
-    for line in reversed(lines[1:]):
-        if size + len(line) + 1 > keep:
-            break
-        tail.insert(0, line)
-        size += len(line) + 1
-    if not tail:
-        tail = [lines[-1][: max(keep, 0)]]
-    t = lines[0] + mark + "\n".join(tail)
+    if len(lines) == 1:
+        t = t[: n - 1] + "…"
+    else:
+        first = lines[0]
+        if len(first) > n // 2:  # dòng verdict có thể rất dài (lý do dán nguyên văn, nhiều việc chờ người): chặn nửa trần
+            first = first[: n // 2 - 1] + "…"
+        keep = n - len(first) - len(mark)
+        tail, size = [], 0
+        for line in reversed(lines[1:]):
+            if size + len(line) + 1 > keep:
+                break
+            tail.insert(0, line)
+            size += len(line) + 1
+        if not tail:
+            tail = [lines[-1][: keep - 1] + "…"]
+        t = first + mark + "\n".join(tail)
 sys.stdout.buffer.write(t.encode("utf-8", "replace"))
 ' 2400 2>/dev/null)" || status='không đọc được trạng thái'
   rest+="===== Autopilot =====
