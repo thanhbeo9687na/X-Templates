@@ -770,3 +770,24 @@
 - Chọn: Sửa 🔴 và các 🟠 là lỗi thật của mã mới (rẻ, có test); phần còn lại ghi nợ chấp nhận có chủ và hạn
 - Lý do (tiêu chí chất lượng cuối): ADR-0062: 🔴 sửa, 🟠/🟢 ghi nợ. Đúng và an toàn: hai 🔴 (lớp tác động tức thì thiếu tệp hàng rào và pr next ra wait ở pha build) đã sửa kèm test; các 🟠 sửa được rẻ và rõ nguyên nhân (biến cờ rò vào test con, commit_alone bị # lừa, _merged_clean thiếu scope, fetch_asset lỗi mạng, nháp mồ côi, O_NOFOLLOW, bootstrap) cũng sửa vì là hồi quy của chính PR. Còn lại (lách _exec_doc_edited, danh sách chặn môi trường chưa đầy đủ, thiết kế allowlist, test AUD-CI-036 cho upgrade) cần thiết kế nên chấp nhận có hạn.
 - Đường lùi: Mở lại các hàng AUD-HAR-478…482 thành mở và làm trong PR kế.
+
+### D-552 · 2026-11-23T21:01:16+00:00 · Duyệt PLAN-harden-2026-11-23: audit delta #746–#755 ở container 3.13, ký GO-NO-GO để môi trường 3.15.2
+
+- Phương án: (1) Làm audit delta và sổ ở đây, không ký · (2) Dừng chờ môi trường 3.15.2
+- Chọn: Làm audit delta và sổ ở đây, không ký
+- Lý do (tiêu chí chất lượng cuối): Nợ review không phụ thuộc phiên bản Python; người chọn mở cờ; không ký khi BASE-DEP-003 đỏ
+- Đường lùi: loop block lại; PLAN chỉ thêm tài liệu và sổ
+
+### D-553 · 2026-11-23T21:19:51+00:00 · Gate T-4004 và bản nháp GO-NO-GO 3.36.0 để mở vòng harden
+
+- Phương án: (1) Sửa Gate T-4004 theo D-551 (chấp nhận hoặc đã sửa) và đặt bản nháp GO-NO-GO NO-GO tạm · (2) loop init --force qua mặt kiểm lại cuối
+- Chọn: Sửa Gate T-4004 theo D-551 (chấp nhận hoặc đã sửa) và đặt bản nháp GO-NO-GO NO-GO tạm
+- Lý do (tiêu chí chất lượng cuối): Gate phải phản ánh quyết định đã duyệt (AUD-HAR-460 chấp nhận một phần); BASE-REPO-006 chấp nhận ứng viên chờ ký; --force là vượt cổng
+- Đường lùi: Hoàn tác commit; xoá bản nháp GO-NO-GO
+
+### D-554 · 2026-11-23T21:39:32+00:00 · Xử lý 🟠 của audit delta #746–#756 (lô A/B): sửa ngay hay chấp nhận có hạn
+
+- Phương án: (1) Chấp nhận có hạn, sửa ở lát kế của đợt 2 PLAN-improve · (2) Sửa ngay trong PR sổ
+- Chọn: Chấp nhận có hạn, sửa ở lát kế của đợt 2 PLAN-improve
+- Lý do (tiêu chí chất lượng cuối): Không có 🔴; ADR-0062: 🟠 là nợ; sửa trong PR sổ đổi mã/hook và buộc review ở head thêm một vòng; hạn 2026-12-15 cho hai mục chặn blueprint/ruff, 2027-01-21 cho còn lại
+- Đường lùi: Đổi trạng thái hàng về mở rồi sửa từng mục
