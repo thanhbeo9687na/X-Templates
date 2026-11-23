@@ -754,6 +754,20 @@
    ]
   },
   {
+   "reason": "Lớp tác động tức thì (ADR-0095) và quyết định của pr next ở pha build, môi trường lệnh cổng commit/triển khai/bootstrap, dấu review v2, tải release và sổ lát: kiểm bằng test đơn vị có repo git tạm và fake gh (tests.test_immediate_effect_review, test_review_scope, test_commit_gate_untracked, test_distribution_bytes, test_release_assets, test_release_states, test_slice_ledger, test_bootstrap, test_deploy_env). Corpus pr.json của adapter không dựng được ref nhánh đích và xt.yaml đã commit nên không mô phỏng được ca này.",
+   "ids": [
+    "AUD-HAR-484",
+    "AUD-HAR-485",
+    "AUD-HAR-486"
+   ]
+  },
+  {
+   "reason": "Phân phối khung: tải archive và biên nhận của release, kiểm digest và attestation (xt_distribution) là I/O mạng và gh attestation, không phải quyết định cho hoặc chặn mô phỏng bằng corpus. tests.test_distribution_bytes kiểm sửa một byte, thay biên nhận, thiếu tệp, thiếu release, tiền tố theo tên repo.",
+   "ids": [
+    "AUD-CI-036"
+   ]
+  },
+  {
    "reason": "Độ dài additionalContext của hook SessionStart và hàng field-workflow của admin-plan là đầu ra của hook/công cụ, không phải quyết định cho hoặc chặn mô phỏng bằng corpus. tests.test_hooks.SessionStartUtf8Test ghim len(additionalContext) ≤ 10000; tests.test_ops_setup_edges và tests.test_admin_plan ghim field_workflow_status.",
    "ids": [
     "AUD-CI-040",

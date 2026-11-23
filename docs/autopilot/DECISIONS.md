@@ -749,3 +749,24 @@
 - Chọn: Chia lưới đột biến thành bốn lớp test độc lập, giữ nguyên mọi biến thể và bất biến, đo lại trọng số shard.
 - Lý do (tiêu chí chất lượng cuối): Giữ nguyên bằng chứng chặn và đối chứng cho phép; phân hoạch có kiểm không thiếu, không trùng. Cân bằng đơn vị lập lịch theo lớp giải quyết quá tải mà không đổi timeout, ngưỡng coverage, bộ luật guard hoặc số vòng fuzz. Phương án 2 rẻ hơn nhưng cần chứng minh tương đương ngữ nghĩa rộng hơn phạm vi sửa CI.
 - Đường lùi: Hoàn tác thay đổi phân lớp và trọng số trong một commit; CI sẽ phản ánh lại giới hạn cũ, không tăng timeout để che lỗi.
+
+### D-549 · 2026-11-23T09:59:51+00:00 · Sổ lát (T-4009) lưu ở đâu
+
+- Phương án: (1) docs/ops/slices/ trong cây theo dõi (SPEC v1) · (2) .autopilot/slices/ — trạng thái máy theo checkout, như runs.jsonl
+- Chọn: .autopilot/slices/ — trạng thái máy theo checkout, như runs.jsonl
+- Lý do (tiêu chí chất lượng cuối): Đúng và an toàn: ghi vào cây theo dõi ở mỗi loop record làm bẩn cây (release-check hàng tree), sinh nợ review cho tệp máy ghi và đổi vân tay gói ký — 4 test test_flow đỏ ở cổng commit. .autopilot/ đã loại khỏi digest, vân tay và nợ review, guard chặn ghi tay. Đổi lại: số đo chỉ theo checkout, như runs.jsonl hiện nay.
+- Đường lùi: Đổi SLICES_DIR và nơi đọc trong xt_flow; sổ cũ ở .autopilot/slices/ chép sang được vì cùng định dạng JSONL.
+
+### D-550 · 2026-11-23T11:20:43+00:00 · T-4014: dấu review v2 dùng scope để làm gì
+
+- Phương án: (1) Scope chỉ siết: review mang sang head mới (chuỗi cập nhật nhánh) còn phải khớp scope đã ghi; v1 và v2 đều được nhận · (2) Scope thay chuỗi compare: head bất kỳ có cùng scope thì dùng lại review
+- Chọn: Scope chỉ siết: review mang sang head mới (chuỗi cập nhật nhánh) còn phải khớp scope đã ghi; v1 và v2 đều được nhận
+- Lý do (tiêu chí chất lượng cuối): Đúng và an toàn: cùng blob của file PR chưa chứng minh được diff so với nhánh đích còn y nguyên (giải xung đột giữ bản của mình vẫn ra cùng blob), nên phương án 2 có thể nới điều kiện mang review; chuỗi _base_merge_chain kèm _base_touches đã là bằng chứng chặt hơn. Phương án 1 chỉ thêm một điều kiện và cho guard/steward nhận cả hai dạng dấu.
+- Đường lùi: Đăng dấu v1 (bỏ base/scope) và gỡ điều kiện scope ở review_gate; guard và steward vẫn nhận v1.
+
+### D-551 · 2026-11-23T15:01:13+00:00 · Xử lý phát hiện rà độc lập PR #756 (ba lô A/B/C)
+
+- Phương án: (1) Sửa 🔴 và các 🟠 là lỗi thật của mã mới (rẻ, có test); phần còn lại ghi nợ chấp nhận có chủ và hạn · (2) Sửa toàn bộ 🟠 trước merge · (3) Gộp mọi phát hiện thành nợ, chỉ sửa 🔴
+- Chọn: Sửa 🔴 và các 🟠 là lỗi thật của mã mới (rẻ, có test); phần còn lại ghi nợ chấp nhận có chủ và hạn
+- Lý do (tiêu chí chất lượng cuối): ADR-0062: 🔴 sửa, 🟠/🟢 ghi nợ. Đúng và an toàn: hai 🔴 (lớp tác động tức thì thiếu tệp hàng rào và pr next ra wait ở pha build) đã sửa kèm test; các 🟠 sửa được rẻ và rõ nguyên nhân (biến cờ rò vào test con, commit_alone bị # lừa, _merged_clean thiếu scope, fetch_asset lỗi mạng, nháp mồ côi, O_NOFOLLOW, bootstrap) cũng sửa vì là hồi quy của chính PR. Còn lại (lách _exec_doc_edited, danh sách chặn môi trường chưa đầy đủ, thiết kế allowlist, test AUD-CI-036 cho upgrade) cần thiết kế nên chấp nhận có hạn.
+- Đường lùi: Mở lại các hàng AUD-HAR-478…482 thành mở và làm trong PR kế.

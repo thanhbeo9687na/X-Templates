@@ -34,6 +34,8 @@ merge_risk_paths: "" # glob thêm vào đường dẫn nhạy cảm (ngoại l�
 # của dự án chấp nhận rủi ro khi giữ auto (LOOP-STOP-005). Thiếu khoá = human; PR đổi khoá luôn người merge
 merge_hard_exceptions: auto
 # delivery_phase xác định pha build hoặc harden. Review merge được cấu hình ở merge_review (ADR-0079).
+# Dù merge_review: optional, PR chạm hook, settings.json, workflow, ruleset hay xt.yaml vẫn cần một lượt review ở head
+# (ADR-0095). Tắt bằng dòng `immediate_review: off` (đọc từ nhánh đích; mặc định on) — thêm dòng đó khi dự án chấp nhận rủi ro.
 delivery_phase: build
 # max_rethink: 1              # trần `pr rethink` mỗi PR (ADR-0061): hết → `pr next` trả `split-or-close`; 0 = không trần; PR cắt bản miễn; lấy mức chặt hơn với nhánh đích
 # review_identity: ""         # khi review required, chỉ dấu của tài khoản này mở được merge (T-1508)
@@ -64,6 +66,9 @@ acceptance_paths: "" # file/thư mục nghiệm thu cách nhau bằng dấu các
 acceptance_report: "" # vd reports/junit.xml — trong dự án VÀ trong .gitignore (file chưa commit làm hàng `tree` FAIL)
 release_artifacts: "" # artifact ứng viên, cách nhau bởi khoảng trắng (sidecar <file>.sha256 nếu có) → `subject.digest`; GO-NO-GO ghi dòng `subject: digest` (mẫu GO-NO-GO.md §1)
 # Triển khai theo ADR-0077: khai deploy_envs, deploy_<env>, smoke_<env>, digest_<env>, rollback_<env>, url_<env> khi đã có đích.
+# deploy_env_pass: tên biến môi trường (khoá, cấu hình) mà lệnh triển khai được thấy, cách nhau dấu cách hoặc phẩy; khai thì
+# chỉ biến hệ thống (PATH, HOME, LANG…) và các tên này qua, thiếu tên nào lệnh dừng nêu tên biến. Chưa khai: lệnh chỉ bỏ biến
+# khởi động/nạp thư viện (BASH_ENV, LD_*, PYTHON*, NODE_OPTIONS…) và `doctor` cảnh báo; allowlist sẽ là mặc định ở bản MINOR kế.
 # Adapter đọc artifact tại $XT_DEPLOY_ARTIFACT_ROOT/<tên trong XT_DEPLOY_ARTIFACTS> khi deploy/rollback. Lệnh digest hỏi bản đang chạy.
 release_approval_days: "" # hạn chữ ký GO-NO-GO §5 để `promotion: approved` (mặc định 30 ngày)
 # release_signoff_scale: M # Trần mặc định S. M/L cần bằng chứng máy và quyền ở nhánh chính.

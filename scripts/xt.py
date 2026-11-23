@@ -151,6 +151,7 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Mapping,
     NamedTuple,
     NoReturn,
     Optional,
@@ -664,7 +665,36 @@ def validate(root: Path) -> List[str]:
         errors += _check_applies_to(d, where, profile_slugs)
         errors += _check_slug_modules(d, where, slugs, by_rel)
         errors += _check_links(d, where, links)
-    return errors + _check_refs(docs, ids) + _check_readmes(root)
+    return errors + _check_refs(docs, ids) + _check_readmes(root) + _check_readme_tag(root)
+
+
+README_TAG_MARK = "Bản đã gắn tag"
+README_PINNED_RE = re.compile(r"v\d+\.\d+\.\d+|/tree/v")
+
+
+def readme_tag_errors(text: str) -> List[str]:
+    """Dòng "Bản đã gắn tag" của README (T-4020): không ghi cứng số phiên bản (sửa tay mỗi lần cắt bản và lệch ngay khi tag mới
+    ra — README từng ghi v3.34.0 khi tag mới nhất là v3.35.0) mà trỏ tới danh sách tag `…/tags` luôn đúng. Không có dòng đó
+    (README của dự án đích) → không kiểm."""
+    errors = []
+    for line in (ln for ln in text.splitlines() if README_TAG_MARK in ln):
+        if README_PINNED_RE.search(line):
+            errors.append(
+                f"README.md: dòng '{README_TAG_MARK}' ghi cứng số phiên bản — lệch mỗi lần cắt bản; dùng liên kết tới "
+                "danh sách tag (…/tags)"
+            )
+        elif "/tags" not in line:
+            errors.append(f"README.md: dòng '{README_TAG_MARK}' cần liên kết tới danh sách tag (…/tags)")
+    return errors
+
+
+def _check_readme_tag(root: Path) -> List[str]:
+    """README cạnh thư mục khung (repo khung: `<gốc>/README.md`); vắng → không kiểm."""
+    readme = root.parent / "README.md"
+    try:
+        return readme_tag_errors(readme.read_text(encoding="utf-8")) if readme.is_file() else []
+    except (OSError, ValueError):
+        return []
 
 
 # ID trỏ tới trong văn bản (AUD-DOC-182): dạng ID checklist; `AUD-…` là ID sổ audit của repo (docs/ops), không phải mục khung.
@@ -2634,6 +2664,81 @@ def _tests_for_file(
     return chosen or None
 
 
+_FileImports = Tuple[Dict[str, Dict[str, str]], Set[str], Set[str]]
+# Câu import đọc bằng regex (không `ast.walk` cả tệp — đo: chậm gấp 2,5 lần bước chọn), kể cả lồng trong hàm và
+# `from x import (a,\n b as c)` nhiều dòng. Chọn dư còn hơn sót: dạng lạ không đọc được → module coi như nhập cả module.
+_FROM_IMPORT_RE = re.compile(r"^[ \t]*from[ \t]+([\w.]+)[ \t]+import[ \t]+(\([^)]*\)|[^\n#;]*)", re.M)
+_PLAIN_IMPORT_RE = re.compile(r"^[ \t]*import[ \t]+([^\n#;]+)", re.M)
+_IMPORT_NAME_RE = re.compile(r"(\w+)(?:\s+as\s+(\w+))?")
+
+
+@functools.lru_cache(maxsize=1 << 10)  # hàm thuần; đọc mỗi tệp test một lần cho mọi module được hỏi
+def _file_imports(text: str) -> _FileImports:
+    """({module: {tên dùng: tên gốc}} của `from … import`, {module nhập cả module hoặc `*`}, {dòng thuộc câu import})."""
+    names: Dict[str, Dict[str, str]] = {}
+    opaque: Set[str] = set()
+    spans: List[Tuple[int, int]] = []
+    for m in _PLAIN_IMPORT_RE.finditer(text):
+        opaque.update(part.split()[0] for part in m[1].split(",") if part.split())
+        spans.append(m.span())
+    for m in _FROM_IMPORT_RE.finditer(text):
+        items = [i.strip() for i in m[2].strip("()").split(",") if i.strip()]
+        parsed = [_IMPORT_NAME_RE.fullmatch(i) for i in items]
+        if any(p is None for p in parsed):  # `*` hay dạng lạ
+            opaque.add(m[1])
+        names.setdefault(m[1], {}).update((p[2] or p[1], p[1]) for p in parsed if p)
+        spans.append(m.span())
+    return names, opaque, {ln for a, b in spans for ln in text[a:b].split("\n")}
+
+
+def _from_imports(text: str, module: str) -> Optional[Tuple[Dict[str, str], Set[str]]]:
+    """({tên dùng trong tệp: tên gốc} của `from <module> import …`, {dòng thuộc mọi câu import}). `import <module>` (dùng
+    qua thuộc tính) hay `import *` → None: không lần được tên, chọn cả tệp."""
+    names, opaque, import_lines = _file_imports(text)
+    return None if module in opaque else (names.get(module, {}), import_lines)
+
+
+def _inherited_hits(
+    b: str, a_cls: Set[str], a_whole: bool, stem: str, texts: Dict[str, str], memo: Dict[str, _TestParts]
+) -> Optional[Set[str]]:
+    """Lớp của tệp `b` dùng (kế thừa, gọi) tên nhập từ tệp test `stem` mà tệp đó đã chọn (`a_whole`: mọi tên nhập);
+    None = `b` không dùng tên nào đã chọn. Dòng import bị bỏ khỏi phần ngoài lớp khi so (tự nó nhắc tên)."""
+    found = _from_imports(texts[b], stem)
+    rest, classes = _test_parts_of(b, texts, memo)
+    if found is None:
+        return set(classes)
+    names, import_lines = found
+    parts = ("\n".join(ln for ln in rest.split("\n") if ln not in import_lines), classes)
+    used = [alias for alias, orig in names.items() if a_whole or orig in a_cls]
+    if used and not classes:  # không có lớp top-level (sinh động, hay tệp không parse được): chạy cả tệp
+        return set()
+    hit: Set[str] = set()
+    for alias in used:
+        hit |= _test_classes_hit(alias, parts, False) or set()
+    return hit or None
+
+
+def _propagate_inherit(chosen: Dict[str, Set[str]], texts: Dict[str, str], memo: Dict[str, _TestParts]) -> None:
+    """Bắc cầu qua tệp (AUD-TEST-131): tệp B nhập lớp/tên từ tệp test A đã chọn → chọn lớp của B dùng tên đó; lặp tới
+    điểm dừng để đi hết chuỗi A → B → C (hàng đợi: chỉ xét lại tệp vừa thêm lớp). Chỉ thêm, không bớt."""
+    importers: Dict[str, List[str]] = {}
+    for b, text in texts.items():
+        if "import" in text:
+            names, opaque, _ = _file_imports(text)
+            for module in {*names, *opaque}:
+                importers.setdefault(module, []).append(b)
+    queue = list(chosen)
+    while queue:
+        a = queue.pop()
+        a_cls, stem = chosen[a], posixpath.splitext(posixpath.basename(a))[0]
+        a_whole = a_cls == set(_test_parts_of(a, texts, memo)[1])
+        for b in importers.get(stem, []):
+            hit = None if b == a else _inherited_hits(b, a_cls, a_whole, stem, texts, memo)
+            if hit is not None and (b not in chosen or not hit <= chosen[b]):
+                chosen.setdefault(b, set()).update(hit)  # rỗng = tệp không có lớp top-level: chạy cả tệp
+                queue.append(b)
+
+
 def test_select_plan(root: Path, tests_dir: str, files: Sequence[str]) -> Optional[Dict[str, Set[str]]]:
     """{file test (POSIX, theo gốc) liên quan tới `files`: lớp top-level BỎ QUA (rỗng = cả file)}; None = cả suite."""
     tests_rel = posixpath.normpath(tests_dir)
@@ -2649,6 +2754,7 @@ def test_select_plan(root: Path, tests_dir: str, files: Sequence[str]) -> Option
             return None
         for t, cls in hit.items():
             chosen.setdefault(t, set()).update(cls)
+    _propagate_inherit(chosen, texts, parts)
     return {t: set(parts[t][1]) - cls for t, cls in chosen.items()}
 
 
@@ -3231,7 +3337,85 @@ def loop_record(
         print(ev["output_tail"][-2000:])
     else:
         _tick_after_green(base, st, task, cmd_str, tick and not ev.get("zero_tests_red", False))
+        _slice_task_green(base, st if clears else {}, ev)  # chỉ lần chạy đúng Gate của task mới vào sổ lát
     return code
+
+
+# Sổ lát (SPEC-slice-ledger, T-4009): mỗi lát một tệp JSONL chỉ nối thêm trong `.autopilot/slices/` (trạng thái máy theo
+# checkout như `runs.jsonl` — D-549: không làm bẩn cây, không sinh nợ review); lệnh có sẵn ghi, `xt_flow` đọc số đo.
+SLICES_SUBDIR = "slices"
+SLICE_KINDS = ("requirement", "task_green", "pr", "review", "merged", "artefact", "deployed", "incident", "cost")
+SLICE_ID_RE = re.compile(r"[A-Za-z0-9._-]+/[A-Z][A-Z0-9]*-[0-9]+")
+_SLICE_TASK_RE = re.compile(r"^\s*- \[.\] `([A-Z][A-Z0-9]*-[0-9]+)`")
+
+
+def slice_of(plan: Path, task: str) -> str:
+    """`<tên PLAN>/<task đầu của lát chứa task>`; lát = tiêu đề `### ` của PLAN. Task trước mọi tiêu đề, PLAN không đọc
+    được hay task không có trong PLAN → lát là chính task."""
+    first, in_slice = "", False
+    with contextlib.suppress(OSError, ValueError):
+        for line in plan.read_text(encoding="utf-8").splitlines():
+            if line.startswith("### "):
+                first, in_slice = "", True
+            elif m := _SLICE_TASK_RE.match(line):
+                first = first or (m[1] if in_slice else "")
+                if m[1] == task:
+                    return f"{plan.stem}/{first or task}"
+    return f"{plan.stem}/{task}"
+
+
+def slice_append(base: Path, slice_id: str, kind: str, source: str, ref: str, data: Dict[str, Any]) -> bool:
+    """Nối một sự kiện vào sổ của lát. Số đo không chặn luồng: định danh/kind sai hay lỗi ghi → False, không ném."""
+    if kind not in SLICE_KINDS or not SLICE_ID_RE.fullmatch(slice_id):
+        return False
+    event = {"schema": 1, "slice": slice_id, "kind": kind, "at": now_iso(), "source": source, "ref": ref, "data": data}
+    try:
+        folder = state_write_dir(base, SLICES_SUBDIR)  # không ghi xuyên liên kết ở thư mục (AUD-HAR-405)
+        folder.mkdir(parents=True, exist_ok=True)
+        # O_NOFOLLOW cho cả thành phần cuối và mode 0o600 như `runs.jsonl` (`_append_line`)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(folder / f"{slice_id.replace('/', '__')}.jsonl", flags, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_redact_values(event), ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError:
+        return False
+    return True
+
+
+def _redact_values(value: Any) -> Any:
+    """Che bí mật trong TỪNG giá trị chuỗi (`redact`) trước khi tuần tự hoá — che trên cả dòng JSON làm hỏng dấu nháy."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: _redact_values(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_values(v) for v in value]
+    return value
+
+
+def _slice_task_green(base: Path, st: Dict[str, Any], ev: Dict[str, Any]) -> None:
+    """`loop record` xanh đúng Gate của task trong PLAN → sự kiện `task_green` cho lát của task."""
+    plan = st.get("plan")
+    if isinstance(plan, str) and plan:
+        sid = slice_of(base / plan, str(ev["task"]))
+        slice_append(
+            base,
+            sid,
+            "task_green",
+            "loop record",
+            str(ev["task"]),
+            {"head": ev["head"], "cmd_sha256": ev["cmd_sha256"]},
+        )
+
+
+def current_slice(base: Path) -> Optional[str]:
+    """Lát của task có bằng chứng mới nhất trong vòng đang chạy (mặc định cho `pr reviewed`); không có → None."""
+    st = read_state(base) or {}
+    plan, d = st.get("plan"), state_dir(base) / "evidence"
+    files = sorted(d.glob("*.json"), key=lambda p: p.stat().st_mtime) if d.is_dir() else []
+    if not isinstance(plan, str) or not plan or not files:
+        return None
+    return slice_of(base / plan, files[-1].stem)
 
 
 def _warn_executor_mismatch(
@@ -4859,8 +5043,46 @@ def _python_runtime_error() -> Optional[Finding]:
     return Finding("runtime", "error", f"cần CPython 3.13 trở lên — hiện là {detected}")
 
 
+def _python_prerelease_warning(info: Any = None) -> Optional[Finding]:
+    """CPython alpha/beta/rc (T-4011): cổng cục bộ chạy trên bản tiền phát hành có thể lệch CI (bản chính thức)."""
+    info = info or sys.version_info
+    level = getattr(info, "releaselevel", "final")  # tuple thường (không có releaselevel) → coi như bản chính thức
+    if level == "final":
+        return None
+    return Finding(
+        "runtime",
+        "warn",
+        f"CPython {info[0]}.{info[1]}.{info[2]} là bản tiền phát hành ({level}) — cổng cục bộ có thể lệch"
+        " CI; dựng bản chính thức: `dev-task.sh bootstrap`",
+    )
+
+
+def _doctor_deploy_env(base: Path) -> List[Finding]:
+    """T-4016: `deploy_env_pass` sai tên → lỗi; deploy bật (`deploy_envs`) mà chưa khai → cảnh báo (allowlist mặc định bật ở
+    bản MINOR kế; lệnh triển khai hiện chỉ bỏ biến khởi động/nạp thư viện). Không có xt.yaml → không nói gì."""
+    try:
+        keys = {k: yaml_scalar(v) for k, v in _xt_keys(base).items()}
+        enabled = bool(_deploy_env_names(base))
+    except (OSError, ValueError):
+        return []
+    err = deploy_env_pass_error(keys)
+    if err:
+        return [Finding("xt-yaml", "error", err)]
+    if enabled and not deploy_env_pass(keys):
+        return [
+            Finding(
+                "xt-yaml",
+                "warn",
+                f"deploy_envs đã bật nhưng chưa khai {DEPLOY_ENV_PASS_KEY} — lệnh triển khai còn thừa kế mọi biến môi"
+                " trường của phiên (trừ biến khởi động/nạp thư viện); liệt kê tên biến cần (khoá, cấu hình) để chạy"
+                " allowlist, sẽ là mặc định ở bản MINOR kế",
+            )
+        ]
+    return []
+
+
 def _doctor_runtime() -> List[Finding]:
-    runtime = _python_runtime_error()
+    runtime = _python_runtime_error() or _python_prerelease_warning()
     out = [runtime] if runtime else []
     out += [
         Finding("runtime", "error", f"thiếu `{t}` trên PATH — hook, cổng commit và commit/push của autopilot cần nó")
@@ -5330,7 +5552,7 @@ def _doctor_xt_yaml(base: Path, fw: Path) -> List[Finding]:
     text = p.read_text(encoding="utf-8")
     lines = [m for m in map(YAML_KEY_RE.match, text.splitlines()) if m]
     keys = {m[1]: m[2] for m in lines}
-    out = _doctor_gate_tools(keys) + _doctor_yaml_layout(text, lines)
+    out = _doctor_gate_tools(keys) + _doctor_yaml_layout(text, lines) + _doctor_deploy_env(base)
     scalars = {k: yaml_scalar(v) for k, v in keys.items()}
     for key, choices in APPROVAL_CEILINGS.items():
         if scalars.get(key) and scalars[key] not in choices:
@@ -5341,9 +5563,11 @@ def _doctor_xt_yaml(base: Path, fw: Path) -> List[Finding]:
     gate_err = commit_gate_error(scalars)
     if gate_err:
         out.append(Finding("xt-yaml", "error", gate_err + " — sửa thành fast hoặc full"))
-    review_err = merge_review_error(scalars)
-    if review_err:
-        out.append(Finding("xt-yaml", "error", review_err))
+    out += [
+        Finding("xt-yaml", "error", err)
+        for err in (merge_review_error(scalars), immediate_review_error(scalars))
+        if err
+    ]
     rethink_err = max_rethink_error(scalars)
     if rethink_err:
         out.append(Finding("xt-yaml", "warn", f"{rethink_err} — đang dùng trần mặc định {MAX_RETHINK_DEFAULT}"))
@@ -6775,6 +6999,7 @@ def merge_decision(
         "autonomy": autonomy,
         "stacked": _stacked_blocker(pr) is not None,
         "base_merge_of": [str(x) for x in pr.get("baseMergeOf") or [] if isinstance(x, str)],
+        "head_scope": str(pr.get("headScope") or ""),  # chỉ so với dấu review v2 (T-4014)
         # PR cắt bản (đổi `VERSION` gốc — tag gắn lúc merge): không ghi nợ review (ADR-0059 §6, D-259)
         "release": is_release_pr(pr),
         "hard": hard,  # ngoại lệ cứng: máy không merge (ADR-0016)
@@ -6846,6 +7071,42 @@ def merge_review_error(keys: Dict[str, str]) -> Optional[str]:
     if "merge_review" not in keys or keys["merge_review"] in ("optional", "required"):
         return None
     return f"xt.yaml: merge_review '{keys['merge_review']}' không hợp lệ (optional|required)"
+
+
+# Lớp "tác động tức thì" (ADR-0095): thay đổi mà chính nó là lớp đỡ hoặc có hiệu lực ngay khi merge cần một lượt rà ở head
+# dù `merge_review: optional`. Tập đường dẫn cố định; chính sách (`immediate_review: on|off`) đọc từ nhánh đích.
+IMMEDIATE_KEY = "immediate_review"
+IMMEDIATE_PATHS = (
+    ".claude/hooks/",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".codex/hooks.json",
+    ".cursor/hooks.json",
+    ".github/hooks/xt.json",
+    ".grok/hooks/xt.json",
+    ".opencode/plugins/xt.ts",
+    ".gemini/settings.json",
+    ".github/workflows/",
+    ".github/rulesets/",
+    "xt.yaml",
+)  # ⊇ `FENCE_FILES` của guard.py (test giữ hai nhà khớp nhau); so không phân biệt hoa/thường như `RISK_PATH_RES`
+IMMEDIATE_NOTE = "chạm lớp tác động tức thì (ADR-0095) — cần review ở head dù merge_review: optional"
+
+
+def immediate_review_error(keys: Dict[str, str]) -> Optional[str]:
+    """Khoá vắng/rỗng dùng `on`; đã khai thì phải là on hoặc off."""
+    if keys.get(IMMEDIATE_KEY, "") in ("", "on", "off"):
+        return None
+    return f"xt.yaml: {IMMEDIATE_KEY} '{keys[IMMEDIATE_KEY]}' không hợp lệ (on|off)"
+
+
+def immediate_effect_paths(base: Path, ref: str, changed: List[str], prefix: str) -> List[str]:
+    """Đường dẫn đổi thuộc lớp tác động tức thì, kể cả khi đặt dưới tiền tố dự án con. Chỉ `off` đã commit ở nhánh đích
+    mới tắt (PR không tự miễn bằng cách sửa xt.yaml của nó); giá trị lạ → như `on`."""
+    if _committed_xt_keys(base, ref).get(IMMEDIATE_KEY) == "off":
+        return []
+    roots = ("", prefix.lower())
+    return [f for f in changed if any(f.lower().startswith(r + p) for r in roots for p in IMMEDIATE_PATHS)]
 
 
 # Cổng trước commit (D-NNN do phiên chính ghi): `fast` = hook commit chạy `dev-task.sh gate-fast` (format/lint/typecheck +
@@ -7476,6 +7737,12 @@ def _pr_rest(pr_arg: Optional[str], local_check: bool = True) -> Dict[str, Any]:
         **({"strictBaseRepo": repo} if strict_base else {}),
         # Head là "cập nhật nhánh" sạch của các head này (mới → cũ): review sạch ở chúng mang sang head hiện tại.
         **({"baseMergeOf": chain} if (chain := _base_merge_chain(repo, str(base.get("sha", "")), sha)) else {}),
+        # Scope của head hiện tại, chỉ khi có chuỗi cập nhật (T-4014): dấu review v2 ở head cũ phải khớp mới được mang sang.
+        **(
+            {"headScope": scope}
+            if chain and (scope := scope_digest(_pr_change_set(repo, str(base.get("sha", "")), sha)))
+            else {}
+        ),
         "headRefOid": sha,
         "labels": [{"name": lb.get("name", "")} for lb in pr.get("labels") or [] if isinstance(lb, dict)],
         "statusCheckRollup": rollup,
@@ -11422,6 +11689,8 @@ def cmd_ci_check(args: argparse.Namespace) -> int:
         delivery_phase_error(keys),
         commit_gate_error(keys),
         merge_review_error(keys),
+        immediate_review_error(keys),
+        deploy_env_pass_error(keys),
     ):
         if cfg_err:
             print(f"✗ {cfg_err}")
@@ -12482,10 +12751,17 @@ def _merge_eval(pr: Dict[str, Any], local: bool = False) -> Tuple[Dict[str, Any]
         if module
         else []
     )
-    risk = [*risk, *protected]
+    immediate = immediate_effect_paths(project_dir(), ref, list(_risky_paths(pr)), project_prefix())
+    if (
+        immediate
+    ):  # tính pha harden như PR sửa xt.yaml (D-137): không hoãn review ở pha build, mọi bên đọc cùng pha (ADR-0095)
+        phase = "harden"
+        phase_notes = [*phase_notes, f"{IMMEDIATE_NOTE}: {', '.join(sorted(set(immediate))[:3])}"]
+    risk = [*risk, *protected]  # lớp tác động tức thì chỉ đòi review (không thành ngoại lệ cứng giữ người)
     rec = _pr_record(read_reviews(project_dir()), str(pr.get("number", ""))) if local else None
     decision = merge_check_result(pr, autonomy, risk, hard_auto, phase, rec)
-    if not protected and _committed_xt_keys(project_dir(), ref).get("merge_review", "optional") == "optional":
+    needs_review = bool(protected or immediate)
+    if not needs_review and _committed_xt_keys(project_dir(), ref).get("merge_review", "optional") == "optional":
         decision = optional_review_decision(pr, autonomy, risk, hard_auto, phase)
     return decision, notes + hard_notes + phase_notes
 
@@ -13947,6 +14223,29 @@ def _release_phase(base: Path) -> Dict[str, str]:
     return _release_row("phase", "PASS", f"`{PHASE_KEY}: {keys.get(PHASE_KEY) or 'harden'}` (vắng = harden)")
 
 
+# Tài liệu có lệnh chạy được (AUD-HAR-460, D-535): `release-check`, CI, duyệt tag và Gate của vòng lặp chạy chúng, nên đổi
+# LỆNH tính như mã; sửa mô tả thuần không sinh nợ. Mục blueprint là một dòng chứa cả mô tả lẫn `— Kiểm:`, nên so PHẦN LỆNH
+# (từ dấu `Kiểm:`/`Gate:`/`grant:` tới hết dòng) giữa bản cũ và mới, không so dòng.
+_CMD_PART = r"(?:Kiểm:|Gate:|grant:).*$"
+EXEC_DOC_LINES: Tuple[Tuple["re.Pattern[str]", "re.Pattern[str]"], ...] = (
+    (re.compile(r"(^|/)BLUEPRINT\.md$"), re.compile(_CMD_PART)),
+    (re.compile(r"(^|/)docs/(archive/)?autopilot/PLAN[^/]*\.md$"), re.compile(_CMD_PART)),
+)  # mẫu `framework/templates/*.md` không ở đây: `is_doc_path` đã coi là mã nên mọi sửa đều sinh nợ (chặt hơn)
+
+
+def _exec_doc_edited(root: Path, sha: str, path: str) -> bool:
+    """Phần lệnh của tài liệu chạy được có khác giữa `sha` và HEAD (thêm, xoá, đổi; dời chỗ không tính)? Tài liệu khác → False."""
+    part_re = next((lr for pr, lr in EXEC_DOC_LINES if pr.search(path)), None)
+    if not part_re:
+        return False
+    diff = _git(root, "--literal-pathspecs", "diff", "-U0", "--no-renames", f"{sha}..HEAD", "--", path).stdout
+    parts: Dict[str, List[str]] = {"-": [], "+": []}
+    for ln in diff.splitlines():
+        if ln[:1] in parts and not ln.startswith(("+++", "---")):
+            parts[ln[0]] += [m.group(0).strip() for m in part_re.finditer(ln[1:])]
+    return sorted(parts["-"]) != sorted(parts["+"])
+
+
 def review_debt(root: Path, status: Path) -> Tuple[List[str], List[str]]:
     """Nợ review (ADR-0031): (file ngoài tài liệu đổi sau SHA quét mà audit chưa phủ, SHA quét đã dùng). Nhóm đã quét/rút
     gọn của sổ phủ file thuộc nhóm đó (`_path_groups`) tới SHA của nhóm; file không thuộc nhóm nào (cấu hình cổng như
@@ -13969,7 +14268,7 @@ def _review_debt_since(root: Path, status: Path) -> Tuple[Dict[str, str], List[s
     for sha in set(scanned.values()):
         # -z: tên chứa `"`/`\\`/ký tự điều khiển không bị trích dẫn kiểu C (trích dẫn → lệch nhóm, bỏ sót nợ — review #317)
         names = _git(root, "diff", "-z", "--no-renames", "--name-only", f"{sha}..HEAD").stdout.split("\0")
-        changed[sha] = [f for f in names if f and not is_doc_path(f)]
+        changed[sha] = [f for f in names if f and (not is_doc_path(f) or _exec_doc_edited(root, sha, f))]
     ahead = {s: int(_git(root, "rev-list", "--count", f"{s}..HEAD").stdout.strip() or 0) for s in changed}
     since: Dict[str, str] = {}
     for no, sha in scanned.items():
@@ -14002,7 +14301,10 @@ def _merged_clean(repo: str, commit: str, subject: str, identity: str) -> Option
         return ""
     base_sha = str((pull.get("base") or {}).get("sha", "")) if isinstance(pull.get("base"), dict) else ""
     marks = _published_marks(repo, m[1], identity)
-    d = {"head": head, "lane": "chuẩn", "base_merge_of": _base_merge_chain(repo, base_sha, head)}
+    chain = _base_merge_chain(repo, base_sha, head)
+    # head_scope như `_pr_rest`: dấu review v2 mang sang qua chuỗi cập nhật phải khớp phạm vi mới được tính trả nợ (T-4014)
+    scope = scope_digest(_pr_change_set(repo, base_sha, head)) if chain else ""
+    d = {"head": head, "lane": "chuẩn", "base_merge_of": chain, "head_scope": scope}
     return m[1] if review_gate(d, marks)["state"] == "ok" else ""
 
 
@@ -14456,8 +14758,41 @@ ARTIFACTS_KEY = "release_artifacts"  # đường file cách nhau bởi khoảng 
 APPROVAL_DAYS_KEY = "release_approval_days"  # chữ ký GO-NO-GO còn hiệu lực bao nhiêu ngày (mặc định 30)
 APPROVAL_DAYS = 30
 # schema của `release-check --json`: 3 = thêm subject/artifacts/results/promotion, giữ trường cũ; `subject.content`
-# (D-389) chỉ thêm trường — không tăng (người đọc schema 3 bỏ qua khoá lạ)
-RELEASE_SCHEMA = 3
+# (D-389) chỉ thêm trường — không tăng (người đọc schema 3 bỏ qua khoá lạ). 4 (T-4019) = thêm `states` (kiểm kỹ thuật ·
+# nội dung đã ký · đã phân phối), `promotion.signer`, và tên `pending_signoff` khi agent là người ký; bên đọc nhận cả schema 3
+# và tên cũ `pending_human` một chu kỳ (`RELEASE_SCHEMAS`, `promotion_pending`).
+RELEASE_SCHEMA = 4
+RELEASE_SCHEMAS = (3, 4)
+PROMO_PENDING_SIGNOFF = "pending_signoff"  # chờ dòng ký §5 mà agent ký được (`release_signoff: agent`, ADR-0074)
+PROMO_PENDING_HUMAN = "pending_human"  # chờ người ký; cũng là tên cũ của mọi ca chờ ký (schema 3)
+
+
+def promotion_pending(state: object) -> bool:
+    """`promotion.state` là "chờ chữ ký" — tên mới `pending_signoff` hoặc tên cũ `pending_human` (bên đọc nhận cả hai)."""
+    return state in (PROMO_PENDING_SIGNOFF, PROMO_PENDING_HUMAN)
+
+
+def release_states(rows: List[Dict[str, str]], fails: List[str], promotion: Dict[str, Any]) -> Dict[str, Any]:
+    """Ba trạng thái tách bạch của một ứng viên (T-4019): `technical` (hàng BLOCKER không FAIL) · `signed` (nội dung đã ký
+    đúng vân tay — suy từ `promotion`, trạng thái lạ không bao giờ là `signed`) · `distributed` (hàng `deploy`). Chỉ đọc kết
+    quả đã tính; không dùng exit code."""
+    state = promotion.get("state")
+    signed = (
+        "signed"
+        if state == "approved"
+        else "rejected"
+        if state == "rejected"
+        else "pending"
+        if promotion_pending(state)
+        else "not_ready"
+    )
+    deploy = next((r["result"] for r in rows if r["id"] == "deploy"), "")
+    distributed = {"PASS": "deployed", "FAIL": "not_distributed"}.get(deploy, "not_configured")
+    return {
+        "technical": {"state": "failed" if fails else "passed", "fails": list(fails)},
+        "signed": {"state": signed, "reasons": list(promotion.get("reasons") or [])},
+        "distributed": distributed,
+    }
 
 
 SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
@@ -14872,10 +15207,11 @@ def _approval_problem(base: Path, rel: str, text: str, subject: Dict[str, Any]) 
 
 def _release_promotion(base: Path, fails: List[str], human: List[str], subject: Dict[str, Any]) -> Dict[str, Any]:
     """`blocked` (hàng BLOCKER FAIL) · `rejected` (một dòng ký từ chối ở bất kỳ GO-NO-GO nào của VERSION) ·
-    `pending_human` (còn việc người, chữ ký thiếu/không phải GO/hết hạn/chưa gắn subject) · `approved`. Máy không nâng
-    `pending_human` (ADR-0068 câu 3): "đã duyệt" là một dòng ký §5 — của người, hoặc của agent qua `release-sign` khi
-    dự án khai `release_signoff: agent` (ADR-0074); `by` của `approved` liệt kê ô tên đã ký (`agent` = agent ký). Dòng
-    ô tên `agent` khi khoá không có hiệu lực (`release_agent_signoff`) → `pending_human` (review #480)."""
+    chờ ký (còn việc người, chữ ký thiếu/không phải GO/hết hạn/chưa gắn subject) · `approved`. Chờ ký tên `pending_signoff`
+    khi agent là người ký (`release_signoff: agent` có hiệu lực, ADR-0074), `pending_human` khi cần người; `signer` nói rõ
+    (T-4019; bên đọc nhận cả hai tên — `promotion_pending`). Máy không nâng chờ ký (ADR-0068 câu 3): "đã duyệt" là một dòng
+    ký §5 — của người, hoặc của agent qua `release-sign`; `by` của `approved` liệt kê ô tên đã ký (`agent` = agent ký).
+    Dòng ô tên `agent` khi khoá không có hiệu lực (`release_agent_signoff`) → `pending_human` (review #480)."""
     if fails:
         return {"state": "blocked", "reasons": fails}
     docs = _signed_go_no_go(base)
@@ -14884,30 +15220,43 @@ def _release_promotion(base: Path, fails: List[str], human: List[str], subject: 
     if rejected:
         return {"state": "rejected", "reasons": rejected}
     if human:
-        return {"state": "pending_human", "reasons": human}
+        # agent chỉ ký được khi chữ ký là việc người DUY NHẤT còn lại (`release_sign` từ chối nếu còn việc khác)
+        return _pending_signoff(base, human, "" if set(human) <= set(RELEASE_SIGN_HUMAN_OK) else "human")
     if not docs:
-        return {"state": "pending_human", "reasons": ["chưa có GO-NO-GO đã ký §5 cho VERSION — người ký"]}
+        return _pending_signoff(base, ["chưa có GO-NO-GO đã ký §5 cho VERSION — người ký"])
     pending = [p for p in problems if p]
     if pending:
-        return {"state": "pending_human", "reasons": pending}
+        return _pending_signoff(base, pending)
     by = sorted({name for _, text in docs for name in _go_signers(text)})
     if any(name.casefold() == RELEASE_AGENT_NAME for name in by) and not release_agent_signoff(base, fresh=True):
-        return {
-            "state": "pending_human",
-            "reasons": [
+        return _pending_signoff(
+            base,
+            [
                 f"dòng ký ô tên `{RELEASE_AGENT_NAME}`: `{RELEASE_SIGNOFF_KEY}: agent` chưa có hiệu lực (cần ở cả xt.yaml"
                 " cây làm việc lẫn nhánh chính, ADR-0074) — người ký"
             ],
-        }
+            signer="human",
+        )
     result: Dict[str, Any] = {"state": "approved", "reasons": [rel for rel, _ in docs], "by": by}
     if RELEASE_AGENT_NAME in (name.casefold() for name in by):
         scale = (_blueprint_front(base, RELEASE_SIGN_BLUEPRINT) or ("S", "", ""))[0] or "L"
         if scale != "S":
             problem = _simulated_sign_problem(base, docs, scale)
             if problem:
-                return {"state": "pending_human", "reasons": [problem]}
+                return _pending_signoff(base, [problem])
             result["simulated"] = True
     return result
+
+
+def _pending_signoff(base: Path, reasons: List[str], signer: str = "") -> Dict[str, Any]:
+    """Kết quả "chờ ký": `signer` mặc định theo `release_signoff` (agent có hiệu lực → agent ký được); tên trạng thái theo
+    người ký để không gọi việc của agent là "human"."""
+    who = signer or ("agent" if release_agent_signoff(base) else "human")
+    return {
+        "state": PROMO_PENDING_SIGNOFF if who == "agent" else PROMO_PENDING_HUMAN,
+        "reasons": reasons,
+        "signer": who,
+    }
 
 
 def _go_sign_cells(text: str) -> Iterator[List[str]]:
@@ -15021,6 +15370,7 @@ def release_check(base: Path, blueprint: str, status: str, unchecked_must: str =
     fails = [r["id"] for r in rows if r["result"] == "FAIL" and r["level"] == "BLOCKER"]
     waived = _human_na_waivers(base, rows, subject)
     human = [r["id"] for r in rows if r["result"] == "N/A" and r["level"] == "BLOCKER" and r["id"] not in waived]
+    promotion = _release_promotion(base, fails, human, subject)
     return {
         "schema": RELEASE_SCHEMA,
         "head": head,
@@ -15034,7 +15384,8 @@ def release_check(base: Path, blueprint: str, status: str, unchecked_must: str =
         "subject": subject,
         "artifacts": arts,
         "results": [res for _, res in runs.values() if res],
-        "promotion": _release_promotion(base, fails, human, subject),
+        "promotion": promotion,
+        "states": release_states(rows, fails, promotion),
     }
 
 
@@ -15322,6 +15673,62 @@ def _deploy_metrics(ledger: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 DEV_DRIVER = "node scripts/dev-preview.mjs"
 DEV_ACTIONS = ("deploy", "smoke", "digest", "rollback")
 
+# Biến môi trường làm trình thông dịch/bộ nạp chạy mã ngoài lệnh khai báo (T-4015, bước 1 của ADR-0095 §mục 07): script
+# khởi động shell, bộ nạp thư viện, tuỳ chọn khởi động Python/Node/Perl/Ruby/Java, hàm bash xuất ra. Lệnh triển khai chạy
+# với khoá thật của dự án nên không được thừa kế chúng từ môi trường phiên. Biến thường (PATH, HOME, khoá của dự án) giữ.
+DEPLOY_ENV_DROP = frozenset(
+    {"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4", "NODE_OPTIONS", "NODE_PATH", "PERL5OPT", "PERL5LIB"}
+    | {"RUBYOPT", "RUBYLIB", "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"}
+    | {"PERLLIB", "CDPATH", "MAKEFLAGS", "MAKEFILES", "GCONV_PATH", "HOSTALIASES", "RUBYGEMS_GEMDEPS"}
+)  # danh sách chặn KHÔNG đầy đủ (bước 1); lối thoát/đầy đủ là `deploy_env_pass` (bước 2)
+DEPLOY_ENV_DROP_PREFIX = ("LD_", "DYLD_", "PYTHON", "BASH_FUNC_", "XT_DEPLOY_")
+
+
+# T-4016 (bước 2): `deploy_env_pass: TÊN…` trong xt.yaml → allowlist theo tên. Biến hệ thống cần thiết luôn qua (PATH giữ
+# nguyên của host — công cụ triển khai nằm ở đó); mọi biến khác chỉ qua khi được liệt kê, kể cả khoá và cấu hình.
+DEPLOY_ENV_SYSTEM = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TERM", "TMPDIR", "USER", "LOGNAME")
+DEPLOY_ENV_PASS_KEY = "deploy_env_pass"
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Không được liệt kê dù khai rõ: đường tiêm mã vào shell/bộ nạp; `PYTHON*`/`NODE_OPTIONS`… khai rõ tên thì được qua.
+_DEPLOY_ENV_NEVER = frozenset({"BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "PS4"})
+_DEPLOY_ENV_NEVER_PREFIX = ("LD_", "DYLD_", "BASH_FUNC_", "XT_DEPLOY_")
+
+
+def deploy_env_pass_error(keys: Mapping[str, str]) -> Optional[str]:
+    """Lỗi của `deploy_env_pass` (tên sai dạng hoặc thuộc nhóm không bao giờ qua), nêu tên đầu tiên sai; hợp lệ/vắng → None."""
+    for name in re.split(r"[\s,]+", yaml_scalar(keys.get(DEPLOY_ENV_PASS_KEY, "")).strip()):
+        if name and (
+            not _ENV_NAME_RE.fullmatch(name) or name in _DEPLOY_ENV_NEVER or name.startswith(_DEPLOY_ENV_NEVER_PREFIX)
+        ):
+            return f"xt.yaml: {DEPLOY_ENV_PASS_KEY} có tên không hợp lệ hoặc không được phép qua: {name}"
+    return None
+
+
+def deploy_env_pass(keys: Mapping[str, str]) -> Optional[Tuple[str, ...]]:
+    """Tên biến được khai ở `deploy_env_pass` theo thứ tự khai (bỏ trùng); chưa khai/rỗng → None (chưa bật allowlist)."""
+    err = deploy_env_pass_error(keys)
+    if err:
+        raise DeployError(err)
+    names = [n for n in re.split(r"[\s,]+", yaml_scalar(keys.get(DEPLOY_ENV_PASS_KEY, "")).strip()) if n]
+    return tuple(dict.fromkeys(names)) or None
+
+
+def deploy_command_env(environ: Mapping[str, str], names: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    """Môi trường của lệnh `deploy`/`smoke`/`digest`/`rollback`. `names` None (chưa khai `deploy_env_pass`): bản sao không
+    có biến khởi động/nạp thư viện và không có `XT_DEPLOY_*` (bước 1, T-4015). `names` có (kể cả rỗng): biến hệ thống +
+    đúng các tên đã khai; thiếu tên nào → DeployError nêu tên (không giá trị), không lấy gì thay từ host. Không ghi log."""
+    if names is None:
+        return {
+            k: v for k, v in environ.items() if k not in DEPLOY_ENV_DROP and not k.startswith(DEPLOY_ENV_DROP_PREFIX)
+        }
+    missing = [n for n in names if n not in environ]
+    if missing:
+        raise DeployError(
+            f"{DEPLOY_ENV_PASS_KEY} khai {', '.join(missing)} nhưng môi trường chạy không có biến đó — đặt biến "
+            "(lệnh triển khai không tự lấy khoá khác từ host)"
+        )
+    return {k: environ[k] for k in (*DEPLOY_ENV_SYSTEM, *names) if k in environ}
+
 
 class DevGuardDenied(DeployError):
     """Một bước bị guard chặn trước khi đụng môi trường."""
@@ -15413,6 +15820,7 @@ class DevPreview:
     approved_head: str = ""
     before_effect: Optional[Callable[[str], None]] = None
     touched: bool = False
+    env_pass: Optional[Tuple[str, ...]] = None  # `deploy_env_pass` (T-4016); None = chưa khai, giữ bước 1
 
     @contextlib.contextmanager
     def workspace(self) -> Iterator[None]:
@@ -15431,7 +15839,7 @@ class DevPreview:
     def invoke(self, action: str) -> tuple[dict[str, Any], Optional[str]]:
         """digest đọc giá trị quan sát ở đích; không truyền sẵn đáp án. Sổ không giữ stdout/stderr."""
         cmd = self.commands[action] if self.commands is not None else f"{DEV_DRIVER} {action}"
-        env = {k: v for k, v in os.environ.items() if not k.startswith("XT_DEPLOY_")}
+        env = deploy_command_env(os.environ, self.env_pass)
         paths = self.artifacts
         if self.commands is not None and action in ("deploy", "rollback"):
             _sibling_imports()
@@ -15669,7 +16077,9 @@ def _dev_execute(
         target = current or previous
     prior_digest = target["subject"]["digest"] if target else ""
     receipt = _dev_receipt(subject, artifacts, prior_digest)
-    driver = DevPreview(base, state, timeout, subject, prior_digest, approved_head=approved)
+    env_pass = deploy_env_pass(config)
+    deploy_command_env(os.environ, env_pass)  # thiếu biến đã khai → dừng TRƯỚC khi đụng môi trường
+    driver = DevPreview(base, state, timeout, subject, prior_digest, approved_head=approved, env_pass=env_pass)
     if not packed:
         url = _prepare_configured(
             driver, ledger, target, artifacts, env, commands, explicit, config.get(f"url_{env}", "")
@@ -16790,7 +17200,33 @@ def _pr_next_review(
 # Sổ review dùng chung (ADR-0027): `pr reviewed` đăng kết quả lên PR dưới dạng comment có dấu máy đọc; `pr next` và
 # `pr steward` (workflow pr-steward) gộp các dấu này với sổ cục bộ. Chỉ tin comment của người có quyền ghi repo (OWNER,
 # COLLABORATOR) — người ngoài comment dấu giả không mở được merge. Dấu không mang tên model (ai_attribution).
-REVIEW_MARK_RE = re.compile(r"<!--\s*xt-review v1 head=([0-9a-f]{40}) verdict=(clean|blocking|inconclusive|debt)\s*-->")
+# v1: `head`, `verdict`. v2 (T-4014, D-550): thêm `base` (SHA nhánh đích lúc rà) và `scope` (băm tập thay đổi của PR) — nhóm
+# 2 = verdict, 3 = base, 4 = scope; v1 không có hai nhóm sau. Dấu v2 sai dạng (base/scope không đủ hex) không khớp.
+REVIEW_MARK_RE = re.compile(
+    r"<!--\s*xt-review v(?:1|2) head=([0-9a-f]{40}) verdict=(clean|blocking|inconclusive|debt)"
+    r"(?: base=([0-9a-f]{40}))?(?: scope=([0-9a-f]{64}))?\s*-->"
+)
+_SCOPE_RE = re.compile(r"[0-9a-f]{64}")
+_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def scope_digest(changes: Optional[Set[Tuple[str, str, str, str]]]) -> str:
+    """Băm tập thay đổi của PR (`_pr_change_set`: file, tên cũ, trạng thái, blob SHA) — không phụ thuộc thứ tự. Không đọc
+    được hoặc rỗng → '' (không có scope)."""
+    if not changes:
+        return ""
+    return hashlib.sha256("\n".join("\t".join(c) for c in sorted(changes)).encode("utf-8")).hexdigest()
+
+
+def review_scope(repo: str, key: str, head: str) -> Tuple[str, str]:
+    """(SHA nhánh đích, scope của `head`) để đăng cùng dấu review; lỗi đọc → thiếu từng phần ('' — đăng dấu v1)."""
+    try:
+        base = str((_gh_one(f"{repo}/pulls/{key}").get("base") or {}).get("sha") or "")
+    except PrInputError:
+        return "", ""
+    return base, (scope_digest(_pr_change_set(repo, base, head)) if base else "")
+
+
 # MEMBER không đủ: thành viên org có thể chỉ có quyền đọc repo (review #141).
 TRUSTED_ASSOCIATIONS = {"OWNER", "COLLABORATOR"}
 STANDARD_LABEL = (
@@ -16800,7 +17236,13 @@ TRUSTED_BOTS = {"dependabot[bot]"}  # bot cùng repo được steward xử lý n
 
 
 def review_comment_body(
-    head: str, clean: bool, inconclusive: bool = False, debt: Sequence[str] = (), fixed: Sequence[str] = ()
+    head: str,
+    clean: bool,
+    inconclusive: bool = False,
+    debt: Sequence[str] = (),
+    fixed: Sequence[str] = (),
+    base: str = "",
+    scope: str = "",
 ) -> str:
     """Nội dung comment `pr reviewed`/`pr debt` đăng lên PR: một dòng cho người đọc + dấu cho máy (`pr next`, `pr steward`).
     `inconclusive` (ADR-0029): reviewer không kết luận được (diff bị cắt, hết ngân sách, thiếu file) — không phải lỗi chặn,
@@ -16816,7 +17258,12 @@ def review_comment_body(
         "inconclusive": "chưa kết luận được (diff cắt/hết ngân sách/thiếu bằng chứng) — cần review khác ở head này",
         "debt": "hết lượt review — " + "; ".join(parts),
     }[verdict]
-    return f"Review ở `{head[:7]}`: {text}.\n\n<!-- xt-review v1 head={head} verdict={verdict} -->"
+    # v2 chỉ khi có scope hợp lệ (base tuỳ chọn, hợp lệ mới ghi); thiếu/sai dạng → v1 như trước (đọc được ở mọi bản)
+    extra = (
+        (f" base={base}" if _SHA_RE.fullmatch(base) else "") + f" scope={scope}" if _SCOPE_RE.fullmatch(scope) else ""
+    )
+    version = "v2" if extra else "v1"
+    return f"Review ở `{head[:7]}`: {text}.\n\n<!-- xt-review {version} head={head} verdict={verdict}{extra} -->"
 
 
 def _comment_login(c: Dict[str, Any]) -> str:
@@ -16845,6 +17292,7 @@ def published_reviews(
             row = {"head": m[1], "clean": m[2] in ("clean", "debt") and not edited, "at": str(c.get("created_at", ""))}
             if m[2] in ("inconclusive", "debt"):
                 row[m[2]] = True
+            row.update({k: v for k, v in (("base", m[3]), ("scope", m[4])) if v})  # dấu v2 (T-4014)
             out.append(row)
     return sorted(out, key=lambda r: r["at"])
 
@@ -16973,6 +17421,8 @@ def review_gate(d: Dict[str, Any], reviews: List[Dict[str, Any]], standard_seen:
     at_head = [r for r in reviews if r.get("head") == head]
     last = at_head[-1] if at_head else reviews[-1] if reviews else None
     carried = last is not None and last.get("clean") and last.get("head") in (d.get("base_merge_of") or [])
+    # dấu v2 (T-4014, D-550): phạm vi PR đã đổi hoặc không chứng minh được — chỉ siết, không nới
+    carried = carried and not (last and last.get("scope") and last["scope"] != d.get("head_scope"))
     if not strict:
         state = "na"
     elif last is None or (last.get("head") != head and not carried) or last.get("inconclusive"):
@@ -17668,6 +18118,10 @@ def _pr_reviewed(args: argparse.Namespace, base: Path) -> int:
         return {**rec, "reviews": [*reviews, entry]}
 
     update_reviews(base, key, add)
+    sid = args.slice or current_slice(base)
+    if not seen and sid:
+        data = {"why": args.why, "confirmed": args.confirmed, "rejected": args.rejected, "clean": args.clean}
+        slice_append(base, sid, "review", "pr reviewed", key, data)
     cur = seen[0] if seen else entry
     word = "chưa kết luận (cần review khác)" if args.inconclusive else "sạch" if args.clean else "còn lỗi chặn"
     print(f"✓ PR #{key}: review {word} ở {args.head[:7]}" + (" (đã ghi trước đó — không ghi thêm)" if seen else ""))
@@ -17690,7 +18144,8 @@ def _publish_review(
 ) -> int:
     """Đăng kết quả review lên PR (ADR-0027) để phiên khác và workflow pr-steward thấy; lỗi → exit 3 (sổ cục bộ đã ghi)."""
     repo, _ = _pr_target(pr_arg if PR_URL_RE.search(pr_arg) else key)
-    body = review_comment_body(head, clean, inconclusive, debt, fixed)
+    base, scope = review_scope(repo, key, head)
+    body = review_comment_body(head, clean, inconclusive, debt, fixed, base, scope)
     cmd = ["gh", "api", "-X", "POST", f"{repo}/issues/{key}/comments", "-f", f"body={body}"]
     try:  # cwd = gốc dự án: `{owner}/{repo}` là repo của dự án, không phải thư mục shell đang đứng
         r = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=GH_TIMEOUT, cwd=project_dir())
@@ -22349,6 +22804,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="effort của reviewer — cùng họ model thì phải cao hơn --author-effort",
     )
     prv.add_argument("--author-effort", choices=EFFORTS, help="effort của người viết (so khi cùng họ model, D-161)")
+    prv.add_argument(
+        "--why",
+        choices=("required", "immediate", "suspect"),
+        default="required",
+        help="lý do gọi reviewer, ghi vào sổ lát: cổng đòi, lớp tác động tức thì (ADR-0095), nghi ngờ cụ thể",
+    )
+    prv.add_argument("--confirmed", type=int, default=0, help="số phát hiện được xác nhận (sổ lát)")
+    prv.add_argument("--rejected", type=int, default=0, help="số phát hiện bị bác (sổ lát)")
+    prv.add_argument("--slice", help="lát của PR trong sổ lát (mặc định: lát của task có bằng chứng mới nhất)")
     prv.add_argument(
         "--no-publish",
         action="store_true",

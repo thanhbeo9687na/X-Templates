@@ -11380,7 +11380,7 @@ MCP_MERGE_KEYS = {"owner", "repo", "pullNumber", "expectedHeadSha", "merge_metho
 # Đúng dạng dấu mà `xt.py` đọc (`head=<40 hex> verdict=…`) hoặc head ghép lúc chạy (`head=$(git rev-parse HEAD)`,
 # `$H`, backtick — re-review #159); mã nguồn/tài liệu nhắc dạng dấu (`head={head}`, `head=<sha>`) không khớp.
 REVIEW_MARK_RE = re.compile(
-    r"<!--\s*xt-review\s+v1\s+head=(?:[0-9a-f]{40}|[$`%][^>]{0,200}?)\s+verdict=(?:clean|blocking|inconclusive|debt|[$`%])"
+    r"<!--\s*xt-review\s+v[0-9]+\s+head=(?:[0-9a-f]{40}|[$`%][^>]{0,200}?)\s+verdict=(?:clean|blocking|inconclusive|debt|[$`%])"
 )
 # `gh api` chỉ khi GHI (cờ trường/`--input`/phương thức ghi) — `gh api … --jq` đọc comment không bị chặn (review #159).
 GH_API_WRITE_TEXT = r"(?:\s-[fF]|\s--(?:field|raw-field|input)\b|\s(?:-X\s*|--method[=\s]+)(?:POST|PATCH|PUT)\b)"
@@ -24399,7 +24399,27 @@ def _failure_decision(mode: str, payload: object, cmd: object) -> Dict[str, obje
     return {"decision": ""}
 
 
-NUL_FIELDS = ("decision", "reason", "commit", "no_verify", "commit_dir")
+NUL_FIELDS = ("decision", "reason", "commit", "no_verify", "commit_dir", "commit_alone")  # trường mới nối cuối
+# Lệnh có ký tự này (kể cả trong nháy: `$(…)` trong nháy kép vẫn chạy) thì không khẳng định được là commit đứng một mình.
+# `#`: shlex coi `#` giữa từ là chú thích và cắt phần sau, bash thì không (`-m fix#12 --interactive < feed`).
+_COMMIT_ALONE_BAD = re.compile(r"[$`\n\r\\#]")
+
+
+def commit_alone(cmd: str) -> bool:
+    """Cả lệnh Bash là đúng một `git commit …` đứng một mình (T-4013, D-518): không toán tử shell ngoài nháy, không mở
+    rộng, không xuống dòng, không `--interactive` (gọi `git add -i`, thêm được tệp mới). Khi đó tệp CHƯA TRACK không vào
+    được commit nên cổng commit bỏ chúng khỏi tập tệp đổi. Nghi ngờ → False: cổng giữ cách thận trọng cũ."""
+    if _COMMIT_ALONE_BAD.search(cmd):
+        return False
+    lexer = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        words = list(lexer)
+    except ValueError:
+        return False
+    if words[:2] != ["git", "commit"] or any(w and set(w) <= set(";&|<>()") for w in words):
+        return False
+    return not any(w.startswith("--int") for w in words[2:])  # git nhận mọi tiền tố duy nhất của --interactive
 
 
 def _sh_field(v: object) -> str:
@@ -24419,7 +24439,12 @@ def _rule_decision(mode: str, payload: Any, root: str) -> Dict[str, object]:
         cmd = tool_input.get("command")
         cwd = payload.get("cwd")
         cwd = cwd if isinstance(cwd, str) and posixpath.isabs(cwd) else None
-        return bash_decision(cmd, root, cwd) if isinstance(cmd, str) and cmd else {"decision": ""}
+        if not (isinstance(cmd, str) and cmd):
+            return {"decision": ""}
+        res = bash_decision(cmd, root, cwd)
+        if res.get("commit"):
+            res["commit_alone"] = commit_alone(cmd)
+        return res
     if mode == "edit":
         path = tool_input.get("file_path") or tool_input.get("notebook_path")  # NotebookEdit (AUD-HAR-036)
         d, r = edit_decision(path, root, tool_input) if isinstance(path, str) and path else ("", "")
