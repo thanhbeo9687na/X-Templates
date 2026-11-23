@@ -5,7 +5,8 @@ của bench — `xt.BenchEnv` + `xt._bench_guard` (bộ luật, `_failure_decisi
 Ba bất biến:
 1. **deny đơn điệu** — ca `allowed: false` bọc trong lệnh giữ nguyên ngữ nghĩa vẫn bị chặn;
 2. **không ngoại lệ** — `_rule_decision` không ném (ngoại lệ = fail-open với lệnh không phải merge, AUD-SEC-077/091);
-3. **allow giữ** — ca `allowed: true` bọc vô hại vẫn được cho chạy (không chặn oan).
+3. **allow giữ** — ca `allowed: true` bọc vô hại vẫn được cho chạy (không chặn oan). Ngoại lệ theo hợp đồng có sẵn:
+   merge được `allow` ở strict chỉ khi đứng một mình; biến thể bọc phải là đúng `ask/OTHER_ASK`, không allow hay deny.
 
 Lưới bậc 1 (mỗi ca × mỗi bộ bọc áp được) luôn chạy; thêm `XT_FUZZ_ROUNDS` biến thể ghép 2–3 bộ bọc chọn bằng
 `random.Random(SEED)` (mặc định nhỏ, vài giây). Biến thể đỏ đã biết nằm ở `KNOWN_RED` (kèm lý do + ID sổ audit) và trong
@@ -43,6 +44,7 @@ CORPUS = ROOT / "tests" / "fixtures" / "autonomy"
 PENDING = CORPUS / "pending" / "guard.json"
 SEED = 1811
 ROUNDS = int(os.environ.get("XT_FUZZ_ROUNDS") or "150")
+MUTATION_PARTS = 4  # D-548: toàn bộ lưới đột biến chia theo lớp để CI không dồn vào một shard.
 
 # Từ đầu lệnh làm bộ bọc kiểu exec (`nice`/`timeout`/`command`/gán env) đổi nghĩa: builtin đổi trạng thái shell, từ khoá,
 # gán biến, chuyển hướng đứng đầu. Bọc chúng không còn chạy cùng lệnh → không đòi bất biến.
@@ -391,6 +393,7 @@ class _Runner:
         guard = env.module("guard")
         real = guard._rule_decision
         self.raised: List[str] = []
+        self.last: Dict[str, Any] = {}
 
         def spy(*a: Any) -> Any:
             try:
@@ -405,12 +408,18 @@ class _Runner:
         """(allowed, lỗi) — lỗi rỗng khi guard không ném."""
         self.raised.clear()
         got = xt._bench_guard({**case["input"], "command": cmd}, self.env)
+        self.last = got
         return bool(got["allowed"]), "; ".join(self.raised)
 
 
-def fuzz(rounds: int = ROUNDS, seed: int = SEED) -> Dict[str, Any]:
+def _strict_merge_control(case: Dict[str, Any]) -> bool:
+    """ADR-0036: allow merge ở strict là ngoại lệ chỉ cho lệnh đứng riêng, không phải allow cho cả shell bọc."""
+    return case["input"].get("policy") == "strict" and case["expect"].get("code") == "RULE_ALLOW"
+
+
+def fuzz(rounds: int = ROUNDS, seed: int = SEED, cases: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Chạy lưới bậc 1 + `rounds` biến thể ghép; trả số biến thể và các biến thể vi phạm bất biến."""
-    cases = _cases()
+    cases = _cases() if cases is None else cases
     variants = _grid(cases) + _random(cases, rounds, seed)
     red: Dict[str, Dict[str, Any]] = {}
     with tempfile.TemporaryDirectory(prefix="xt-fuzz-") as tmp:
@@ -418,8 +427,15 @@ def fuzz(rounds: int = ROUNDS, seed: int = SEED) -> Dict[str, Any]:
         for case, vid, cmd in variants:
             allowed, err = runner.run(case, cmd)
             want = bool(case["expect"]["allowed"])
-            if err or allowed != want:
-                why = "exception" if err else ("deny-monotone" if not want else "allow-kept")
+            strict_merge = _strict_merge_control(case)
+            mismatch = (
+                runner.last != {"allowed": False, "decision": "ask", "code": "OTHER_ASK"}
+                if strict_merge
+                else allowed != want
+            )
+            if err or mismatch:
+                why = "strict-merge-ask" if strict_merge else ("deny-monotone" if not want else "allow-kept")
+                why = "exception" if err else why
                 red[vid] = {"case": case, "command": cmd, "invariant": why, "error": err, "allowed": allowed}
     return {"variants": len(variants), "red": red}
 
@@ -483,6 +499,17 @@ class GuardFuzzTest(unittest.TestCase):
 class GuardFuzzWrapTest(unittest.TestCase):
     """Bộ bọc: áp đúng chỗ, từ chối chỗ đổi nghĩa; tất định theo seed."""
 
+    def test_strict_merge_controls_require_ask_for_every_wrapper(self) -> None:
+        """Không bỏ ca strict: oracle đòi đúng ask, bắt cả cho qua sai và deny oan ở 12 biến thể CLI/REST."""
+        cases = [case for case in _cases() if _strict_merge_control(case)]
+        self.assertTrue(cases)
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = _Runner(xt.BenchEnv(Path(tmp).resolve()))
+            for case, vid, cmd in _grid(cases):
+                with self.subTest(variant=vid):
+                    self.assertEqual(runner.run(case, cmd), (False, ""))
+                    self.assertEqual(runner.last, {"allowed": False, "decision": "ask", "code": "OTHER_ASK"})
+
     def test_guard_fuzz_exec_wrap_skips_shell_words(self) -> None:
         nice = WRAPS["nice"]
         self.assertEqual(nice("rm -rf ~"), "nice -n 5 rm -rf ~")
@@ -513,8 +540,41 @@ class GuardFuzzWrapTest(unittest.TestCase):
         self.assertEqual(a, [v[1:] for v in _random(cases, 20, SEED)])
         self.assertNotEqual(a, [v[1:] for v in _random(cases, 20, SEED + 1)])
 
-    def test_guard_fuzz_detects_wrapper_regression(self) -> None:
+    def test_mutation_partitions_keep_every_variant_once(self) -> None:
+        """Chia lớp chỉ đổi nơi chạy: không bỏ hoặc nhân đôi ca corpus và biến thể của lưới gốc."""
+        cases = _cases()
+        owners = [
+            cls
+            for cls in globals().values()
+            if isinstance(cls, type) and issubclass(cls, _GuardFuzzMutation) and issubclass(cls, unittest.TestCase)
+        ]
+        self.assertEqual(sorted(cls.part for cls in owners), list(range(MUTATION_PARTS)))
+        for cls in owners:
+            self.assertGreater(unittest.defaultTestLoader.loadTestsFromTestCase(cls).countTestCases(), 0)
+        parts = [cases[part::MUTATION_PARTS] for part in range(MUTATION_PARTS)]
+        self.assertTrue(all(parts))
+        self.assertCountEqual([case["id"] for part in parts for case in part], [case["id"] for case in cases])
+        self.assertCountEqual([vid for part in parts for _, vid, _ in _grid(part)], [vid for _, vid, _ in _grid(cases)])
+
+    def test_guard_fuzz_runner_records_exception(self) -> None:
+        """Ngoại lệ trong `_rule_decision` được ghi (bất biến 2) dù bench chuyển nó thành `_failure_decision`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            env = xt.BenchEnv(Path(tmp).resolve())
+            env.module("guard").bash_decision = None  # gọi None → TypeError giữa chừng
+            runner = _Runner(env)
+            allowed, err = runner.run({"input": {"tool": "bash", "policy": "default"}}, "ls")
+        self.assertTrue(err)
+        self.assertTrue(allowed)  # fail-open với lệnh không phải merge: đúng lý do bất biến 2 tồn tại
+
+
+class _GuardFuzzMutation:
+    """Mixin, không phải TestCase: mỗi lớp con chạy một phần rời nhau của TOÀN BỘ lưới đột biến (D-548)."""
+
+    part: int
+
+    def check_wrapper_regression(self, tc: unittest.TestCase) -> None:
         """Fuzz có răng: guard giả bỏ qua lệnh bọc `nice` (deny mất) và chặn oan lệnh bọc `timeout` → đỏ đúng bất biến."""
+        cases = _cases()[self.part :: MUTATION_PARTS]
         real = xt.BenchEnv.module
 
         def broken(env: xt.BenchEnv, name: str) -> Any:
@@ -538,25 +598,45 @@ class GuardFuzzWrapTest(unittest.TestCase):
             return mod
 
         with unittest.mock.patch.object(xt.BenchEnv, "module", broken):
-            red = fuzz(rounds=0)["red"]
+            red = fuzz(rounds=0, cases=cases)["red"]
         kinds = {(k.split("--")[1], v["invariant"]) for k, v in red.items() if not excused(k, v)}
         expected = {("nice", "deny-monotone"), ("timeout", "allow-kept")}
+        if any(_strict_merge_control(case) for case in cases):
+            expected |= {("nice", "strict-merge-ask"), ("timeout", "strict-merge-ask")}
         unexpected = {
             k: {"case_id": v["case"]["id"], **{n: v[n] for n in ("command", "invariant", "error", "allowed")}}
             for k, v in red.items()
             if not excused(k, v) and (k.split("--")[1], v["invariant"]) not in expected
         }
-        self.assertEqual(kinds, expected, unexpected)
+        tc.assertEqual(kinds, expected, unexpected)
 
-    def test_guard_fuzz_runner_records_exception(self) -> None:
-        """Ngoại lệ trong `_rule_decision` được ghi (bất biến 2) dù bench chuyển nó thành `_failure_decision`."""
-        with tempfile.TemporaryDirectory() as tmp:
-            env = xt.BenchEnv(Path(tmp).resolve())
-            env.module("guard").bash_decision = None  # gọi None → TypeError giữa chừng
-            runner = _Runner(env)
-            allowed, err = runner.run({"input": {"tool": "bash", "policy": "default"}}, "ls")
-        self.assertTrue(err)
-        self.assertTrue(allowed)  # fail-open với lệnh không phải merge: đúng lý do bất biến 2 tồn tại
+
+class GuardFuzzMutationPart1Test(_GuardFuzzMutation, unittest.TestCase):
+    part = 0
+
+    def test_guard_fuzz_detects_wrapper_regression(self) -> None:
+        self.check_wrapper_regression(self)
+
+
+class GuardFuzzMutationPart2Test(_GuardFuzzMutation, unittest.TestCase):
+    part = 1
+
+    def test_guard_fuzz_detects_wrapper_regression(self) -> None:
+        self.check_wrapper_regression(self)
+
+
+class GuardFuzzMutationPart3Test(_GuardFuzzMutation, unittest.TestCase):
+    part = 2
+
+    def test_guard_fuzz_detects_wrapper_regression(self) -> None:
+        self.check_wrapper_regression(self)
+
+
+class GuardFuzzMutationPart4Test(_GuardFuzzMutation, unittest.TestCase):
+    part = 3
+
+    def test_guard_fuzz_detects_wrapper_regression(self) -> None:
+        self.check_wrapper_regression(self)
 
 
 if __name__ == "__main__":
