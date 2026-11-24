@@ -854,3 +854,17 @@
 - Chọn: contract mặc định bằng hợp đồng artefact hỗ trợ và phải không thấp hơn min_contract; env rơi về tiền tố XT khi tiền tố riêng chưa đặt; gốc không trùng thư mục công cụ khác
 - Lý do (tiêu chí chất lượng cuối): Cách đầu an toàn hơn: tool.json mâu thuẫn bị từ chối thay vì âm thầm nhận; đổi tên công cụ không làm biến chính sách cũ bị bỏ qua mà không báo (hàng rào im lặng tắt); --tool-name git hay claude không đặt được công cụ vào thư mục của công cụ khác. Đánh đổi: danh sách thư mục dành riêng phải bảo trì. Thiếu tool.json mà gốc khác mặc định thì config và tiền tố vẫn mặc định, nên launcher ở P3 phải ghi tool.json cùng lúc.
 - Đường lùi: Bỏ RESERVED_ROOTS, ràng buộc contract và nhánh rơi về XT ở xt_toolcfg.py
+
+### D-564 · 2026-11-24T06:29:15+00:00 · Đưa ~19 máy kiểm từ các ý skill của stored vào khung bằng cách nào?
+
+- Phương án: (1) Một lệnh static-check theo loại và gói xt_checks, mỗi loại một module · (2) Mỗi máy kiểm một lệnh xt.py riêng
+- Chọn: Một lệnh static-check theo loại và gói xt_checks, mỗi loại một module
+- Lý do (tiêu chí chất lượng cuối): Cách đầu đổi hợp đồng ADR-0097 một lần, không làm xt.py phình thêm, mỗi loại có module và test riêng nên viết song song được và gỡ được từng loại; đầu ra và mã thoát thống nhất cho hook và CI. Đánh đổi: thêm một lớp điều phối nhỏ và một gói vào artefact. Chọn loại theo bốn tiêu chí: có MUST hay SHOULD đã đòi mà chưa có máy kiểm, stdlib tất định, ít báo nhầm, nhỏ hơn 150 dòng.
+- Đường lùi: Xoá gói xt_checks, lệnh static-check và các dòng đăng ký ở install.py, xt_pack.py, xt.yaml
+
+### D-565 · 2026-11-24T07:16:42+00:00 · Chọn mức tự động nào với Claude Ship cho khung và dự án đích?
+
+- Phương án: (1) Bậc A mặc định, bậc B (Code Review phụ) khi chủ tổ chức bật và đặt trần chi phí, bậc C chỉ sau khi có số đo từ B, không bao giờ merge mà không người duyệt · (2) Bật cả PR Steward và Approvals ngay để tự động tối đa
+- Chọn: Bậc A mặc định, bậc B (Code Review phụ) khi chủ tổ chức bật và đặt trần chi phí, bậc C chỉ sau khi có số đo từ B, không bao giờ merge mà không người duyệt
+- Lý do (tiêu chí chất lượng cuối): Tự động nhiều nhất mà không mất hàng rào: bậc A đã tự động toàn bộ vòng PR của khung; bậc B thêm một người rà độc lập với chi phí đặt trần; bậc C thêm theo dõi PR chỉ khi B cho thấy giá trị. Hiệu quả theo tuyên bố của Anthropic là số nội bộ không đối chứng nên chưa đủ căn cứ bật mọi thứ. Tài liệu chính thức cho thấy hook của dự án không áp dụng cho git và gh của lệnh ship, và approving review của Claude được tính là approval, nên phương án hai tạo đường merge ngoài kiểm soát của pr next. Bật dịch vụ trả phí là việc của người.
+- Đường lùi: Đổi ADR-0100 sang bậc khác và cập nhật mẫu cấu hình ở framework
