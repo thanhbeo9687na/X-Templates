@@ -917,3 +917,10 @@
 - Chọn: mã 2 kèm tên lỗi
 - Lý do (tiêu chí chất lượng cuối): mã 1 nghĩa là có phát hiện; CI tách được hỏng công cụ khỏi phát hiện thật; không nuốt lỗi vì vẫn in tên lỗi
 - Đường lùi: git revert commit của PR
+
+### D-573 · 2026-11-24T12:36:58+00:00 · Hoàn thiện PLAN nâng trần và tiếp quản PR #786 sau khi main đã dùng D-571/D-572
+
+- Phương án: (1) Giữ kế hoạch năm đợt, sửa phụ thuộc và Gate để kiểm kết quả thật, merge PR tài liệu rồi triển khai từng task ở PR riêng · (2) Merge nguyên kế hoạch, chỉ sửa xung đột văn bản và để Gate yếu cho các phiên sau
+- Chọn: Giữ kế hoạch năm đợt, sửa phụ thuộc và Gate để kiểm kết quả thật, merge PR tài liệu rồi triển khai từng task ở PR riêng
+- Lý do (tiêu chí chất lượng cuối): Kế thừa quyết định trên nhánh ngày 2026-11-24T11:29:42+00:00 (D-571 chưa merge); cấp số mới để giữ nguyên D-571/D-572 đã có trên main. Báo cáo đã tái hiện lỗi SBOM/VEX và thiếu nguồn sổ lát; Gate chỉ validate hoặc tìm chữ không chứng minh chức năng. Tách test diễn tập chín nguồn khỏi sự kiện thực của pilot, gắn đúng quyền admin với T-5020 và khóa đủ phụ thuộc trước phát hành.
+- Đường lùi: git revert PR tài liệu; các phát hiện và hạn chấp nhận trong sổ audit giữ nguyên
