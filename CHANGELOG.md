@@ -52,7 +52,17 @@ Bản < 3.20.0: [`CHANGELOG-ARCHIVE.md`](CHANGELOG-ARCHIVE.md) (T-3651; `changel
 
 ### Fixed
 
+- Policy của PR được đọc từ OID do `git show-ref --verify refs/remotes/origin/<base>` xác minh, để nhánh cục bộ tên `origin/main` hoặc `refs/remotes/origin/main` không che chính sách nhánh đích. Ref theo dõi vắng thì giữ mặc định chặt, không đọc nhầm index; áp dụng cùng nguồn cho mức tự chủ, làn/rà tức thì, danh tính reviewer, giới hạn rethink và hồ sơ acceptance. Hồi quy chạy trên repo Git thật (AUD-HAR-530, D-591, T-5029). Tích hợp cùng giao thức merge theo D-593.
+
+- Guard merge không dùng biến shell chưa export, đã unset hoặc đã thu hồi export làm bằng chứng chọn host/repo; môi trường không xác minh được không cho phép merge ngầm đích. `pr reviewed` kiểm URL theo checkout trước khi ghi sổ review, slice và cost, kể cả `--no-publish`; đầu vào số PR vẫn dùng được ngoại tuyến. Bổ sung ca hồi quy với tiến trình con thật và dọn import trùng trong test chọn đích (AUD-HAR-531/532, D-592, T-5030). Giữ nguyên chính sách tự chủ và các ngưỡng cổng.
+
+- Guard merge dùng parser cờ chung để xử cả cờ ngắn gộp, từ chối selector mơ hồ và xét đúng môi trường sau `env -u`/`env -i`; host được đối chiếu theo lệnh thực thi. `pr next` và watch từ chối danh tính phản hồi mâu thuẫn ngay cả khi thiếu URL/SHA, giữ selector đã chọn qua lỗi và chờ. URL tab `changes` được nhận ở đầu vào người dùng; URL chuẩn từ API vẫn được kiểm chặt (AUD-HAR-526–529, D-590, T-5028).
+
+- CI của PR #797: parser origin tách rõ scheme, userinfo và host, giữ SSH bắt buộc `git@` và HTTPS không userinfo để bộ quét `BASE-CFG-001` không nhận nhầm username thành host. Bổ sung test nhánh không có/nhiều PR và steward thiếu pin live; giữ nguyên bộ quét, tập URL hợp lệ và ngưỡng coverage 100 % (D-589, T-5008).
+
 - Adapter `deploy` lọc họ biến `GIT_*` khỏi môi trường kế thừa và chỉ cho khai tường minh `GIT_SSL_CAINFO`, `GIT_SSL_CAPATH` (T-5007, D-578). `deploy_env_pass:` rỗng chỉ truyền nhóm biến hệ thống cho adapter. **Dự án đích:** khai khóa này cho `run` và `rollback` ở mọi môi trường ngoài `dev`, liệt kê tên biến cần hoặc để rỗng. Các giá trị `null`, `Null`, `NULL`, `~` báo lỗi cấu hình.
+
+- `pr next` sinh `merge_intent` từ PR live với host, repo, số PR và SHA đầy đủ. Steward đọc lại đúng đích trước khi gửi merge ghim SHA. Khung xác minh host/repo của origin trước lần đọc đầu và dùng cùng đích cho policy, watch, nhãn, CI, release và dấu review. Guard cần số PR, đích và pin tường minh; endpoint MCP chưa xác minh trả `UNVERIFIED`. Snapshot vẫn cho xem quyết định và bỏ lệnh ghi (AUD-HAR-492, AUD-HAR-515–521, D-579, D-588, [ADR-0102](docs/adr/0102-merge-intent.md), T-5008).
 
 - `static-check` (AUD-HAR-514): `motion` báo MOT002 khi có `view-transition-name` mà thiếu `prefers-reduced-motion: reduce`. `ac-trace`, `trace` (JSON Lines) và `credits` chỉ tách dòng ở LF, giữ nguyên U+2028 và form feed trong dòng.
 

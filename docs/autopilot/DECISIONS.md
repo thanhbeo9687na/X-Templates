@@ -1008,3 +1008,52 @@
 - Chọn: Giữ nguyên hai phép đo CPU implementation thật; đối chiếu production và mutant bằng tổng byte đường dẫn qua os.open/os.stat/os.lstat thực, tỷ lệ 6 hiện có và khẳng định đã đo
 - Lý do (tiêu chí chất lượng cuối): Job 138516996544 ở head b5af328 báo AssertionError not raised; tái hiện cục bộ dưới coverage sysmon cho kết quả phụ thuộc cặp thời gian, do parser/I/O và syscall che tỷ lệ concat. Đo OS API thật tại n128/512: production 24/24 byte, mutant 19764/275508 byte (13.94 lần). Kiểm tất định đúng hồi quy prefix, giữ các phép đo CPU đầu-cuối đang bảo vệ implementation và không thay cpu_budget hay ngưỡng chung. T-5027 sửa Gate CI này trong cùng PR, không rerun mù và không bỏ test.
 - Đường lùi: Revert riêng thay đổi positive-control nếu đối chứng không phân biệt được; giữ hai test CPU và yêu cầu CI xanh trước merge.
+
+### D-588 · 2026-11-24T17:37:34+00:00 · PR #797: gắn danh tính đích và nguồn policy cho mọi bước đọc, kiểm quyền, merge và theo dõi như thế nào?
+
+- Phương án: (1) Xác minh origin của checkout trước lần đọc đầu; chỉ dùng policy của checkout cùng host/repo; giữ bộ host/repo/PR/head tường minh xuyên suốt, đích hoặc endpoint chưa xác minh thì dừng · (2) Cho phép checkout điều khiển repo khác bằng cách tải động policy từ base đã xác minh của repo đích và mở rộng ngữ cảnh nhiều host
+- Chọn: Xác minh origin của checkout trước lần đọc đầu; chỉ dùng policy của checkout cùng host/repo; giữ bộ host/repo/PR/head tường minh xuyên suốt, đích hoặc endpoint chưa xác minh thì dừng
+- Lý do (tiêu chí chất lượng cuối): Review độc lập tại c319bf8 đã tái hiện 7 lỗi đỏ: lần đọc đầu chọn sai host, policy từ checkout khác, thao tác đi kèm mất đích, watch mất selector, PR suy từ nhánh khác PR gh chọn, MCP không chứng minh host, cache quyền trộn host. Phương án 1 giữ nguồn policy và đích thống nhất, ít trạng thái hơn và có ca hồi quy rõ. Unattended merge cần số PR tường minh; MCP không có metadata endpoint tin cậy trả UNVERIFIED và dùng lệnh REST ghim đích đã xác minh. So sánh gốc worktree khi đứng trong thư mục con, tách chuẩn hóa URL người dùng khỏi API html_url chuẩn; snapshot chỉ xem trước. Mọi sửa lỗi đỏ nằm trong một commit theo ADR-0062; không sửa ngưỡng, bỏ test hay tự đăng dấu review.
+- Đường lùi: Revert nguyên lát T-5008 nếu hợp đồng chưa đủ, giữ đường merge đã được policy kiểm và không nới nhánh chưa xác minh; không tự động chuyển sang tải policy từ repo khác.
+
+### D-589 · 2026-11-24T22:52:53+00:00 · PR #797: sửa CI BASE-CFG-001 và ba nhánh thiếu coverage thế nào để giữ nguyên hợp đồng merge?
+
+- Phương án: (1) Tách scheme, userinfo và host của origin; kiểm SSH bắt buộc git@ và HTTPS không userinfo, giữ bộ quét hiện tại; thêm test cho nhánh lỗi hiện có · (2) Thêm ngoại lệ ssh://git vào bộ quét hoặc bỏ helper chưa phủ để làm coverage xanh
+- Chọn: Tách scheme, userinfo và host của origin; kiểm SSH bắt buộc git@ và HTTPS không userinfo, giữ bộ quét hiện tại; thêm test cho nhánh lỗi hiện có
+- Lý do (tiêu chí chất lượng cuối): Run 45466895506, checks job 138704077943 nhận nhầm userinfo thành host; coverage job 138713852620 thiếu xt.py:7636,7638,18564. Phương án 1 biểu diễn rõ giao thức mà vẫn nhận và từ chối cùng tập origin, giữ nguyên gate và ngưỡng 100%, kiểm steward không ghi khi thiếu danh tính live.
+- Đường lùi: Revert riêng commit sửa CI nếu ma trận URL hoặc cổng hồi quy không đạt; giữ nguyên điều kiện CI xanh trước merge.
+
+### D-590 · 2026-11-24T23:22:22+00:00 · PR #797: khép các lỗ hổng chọn đích còn lại trước merge thế nào?
+
+- Phương án: (1) Dùng bộ phân tích cờ pflag đã có; kiểm host theo đúng lệnh, môi trường thực thi hiệu lực và đối chiếu danh tính phản hồi từng phần với PR đã yêu cầu · (2) Bổ sung từng mẫu chuỗi cho cờ gộp và chỉ kiểm đích khi toàn bộ merge intent đã đầy đủ
+- Chọn: Dùng bộ phân tích cờ pflag đã có; kiểm host theo đúng lệnh, môi trường thực thi hiệu lực và đối chiếu danh tính phản hồi từng phần với PR đã yêu cầu
+- Lý do (tiêu chí chất lượng cuối): Rà độc lập ở eb04e18 tái hiện đổi repo qua -sR sau -R hợp lệ, khác host do gh pr bỏ www., và merge-watch chuyển PR7 sang PR8 từ phản hồi thiếu html_url. Cần giữ nguyên đích đã chọn kể cả khi phản hồi chưa đủ SHA; tái dùng parser có sẵn và dừng khi mơ hồ. Bổ sung môi trường env -u/-i vào kiểm provenance của selector, giữ nguyên policy, coverage và cổng.
+- Đường lùi: Revert commit sửa riêng nếu hồi quy; không merge PR khi còn lỗi đỏ hoặc CI chưa xanh.
+
+### D-591 · 2026-11-25T01:28:38+00:00 · T-5029: đọc policy nhánh đích thế nào để nhánh cục bộ không che ref thật?
+
+- Phương án: (1) Chỉ đổi tên ngắn sang refs/remotes/origin/<base> khi gọi git show · (2) Xác minh ref chính xác bằng show-ref --verify, đọc bằng OID và giữ mặc định chặt khi vắng
+- Chọn: Xác minh ref chính xác bằng show-ref --verify, đọc bằng OID và giữ mặc định chặt khi vắng
+- Lý do (tiêu chí chất lượng cuối): Tên đầy đủ vẫn có thể bị git phân giải sang nhánh cục bộ khi ref thật vắng; OID từ đúng ref khóa nguồn đọc, kiểm hồi quy với repo Git thật và không nới cổng.
+- Đường lùi: git revert commit của PR sửa T-5029
+
+### D-592 · 2026-11-25T01:31:19+00:00 · PR #797: sửa hai lỗi review mới về môi trường lệnh và sổ review thế nào?
+
+- Phương án: (1) Tái sử dụng sổ gán biến bảo thủ và chỉ kiểm đích lúc đăng review · (2) Tách bằng chứng môi trường thực thi và kiểm URL review trước mọi tác dụng phụ
+- Chọn: Tách bằng chứng môi trường thực thi và kiểm URL review trước mọi tác dụng phụ
+- Lý do (tiêu chí chất lượng cuối): Bằng chứng chọn host/repo phải phản ánh môi trường của tiến trình con; review lệch đích không được ghi vào sổ cục bộ. Sửa nhỏ trong giao thức hiện có, thêm ca đỏ/xanh thật, giữ mọi ngưỡng và chính sách tự chủ.
+- Đường lùi: git revert commit của PR sửa AUD-HAR-531 và AUD-HAR-532
+
+### D-593 · 2026-11-25T02:09:36+00:00 · PR #797: nguồn policy T-5029 được tích hợp riêng hay kiểm cùng giao thức merge đã sửa?
+
+- Phương án: (1) Giữ T-5029 ở PR kế tiếp sau #797 · (2) Gộp bản sửa T-5029 đã rà độc lập vào cùng commit khép giao thức merge và kiểm toàn bộ trên một cây mã
+- Chọn: Gộp bản sửa T-5029 đã rà độc lập vào cùng commit khép giao thức merge và kiểm toàn bộ trên một cây mã
+- Lý do (tiêu chí chất lượng cuối): Đích thực thi và nguồn policy cùng quyết định một quyền merge; kiểm chúng trên cùng HEAD tránh chốt giao thức khi nguồn policy còn bị che. T-5029 đã tái hiện đỏ, qua rà độc lập và 4264 test; vẫn chạy lại cổng kết hợp và CI, giữ mọi ngưỡng, giữ ID và bằng chứng riêng.
+- Đường lùi: git revert commit khép giao thức merge; vẫn giữ lịch sử ba phát hiện audit
+
+### D-594 · 2026-11-25T02:56:52+00:00 · PR #797: khép hai dòng thiếu coverage khi đăng review thế nào?
+
+- Phương án: (1) Thêm hồi quy mất origin lúc đăng review và kiểm gửi lại đúng đích sau khi khôi phục · (2) Bỏ xử lý PrInputError tại bước đăng review vì URL đã được kiểm trước
+- Chọn: Thêm hồi quy mất origin lúc đăng review và kiểm gửi lại đúng đích sau khi khôi phục
+- Lý do (tiêu chí chất lượng cuối): CI run 45534056621, job 138939373237 báo scripts/xt.py:18520–18521 chưa được phủ. Số PR vẫn hợp lệ ngoại tuyến nên lỗi origin tại bước đăng có thể xảy ra; cần giữ mã thoát 3, sổ chưa đăng và khả năng gửi lại đúng một lần, giữ nguyên ngưỡng coverage 100 %.
+- Đường lùi: Revert riêng commit bổ sung hồi quy nếu test sai; không bỏ handler hay thay ngưỡng cổng.
